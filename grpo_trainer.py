@@ -14,7 +14,7 @@ from trading_env import TradingEnv
 
 # --- 1. The Policy Network (Micro-sized for HFT speed) ---
 class PolicyNet(nn.Module):
-    def __init__(self, obs_dim=6, action_dim=3, hidden_dim=128):
+    def __init__(self, obs_dim=7, action_dim=3, hidden_dim=128):
         super().__init__()
         self.fc1 = nn.Linear(obs_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
@@ -38,6 +38,9 @@ class GRPOTrainer:
         self.policy = PolicyNet()
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         self.episode_rewards = deque(maxlen=100)
+        # Per-regime diagnostics: action histograms + mean equity, keyed by day regime
+        self.regime_actions = {r: np.zeros(3) for r in range(4)}
+        self.regime_equity = {r: [] for r in range(4)}
         # Snapshot of behavior policy (frozen) so new/old log-prob ratios aren't trivially 1
         self.behavior_policy = PolicyNet()
         self.behavior_policy.load_state_dict(self.policy.state_dict())
@@ -69,6 +72,9 @@ class GRPOTrainer:
                 reward_list.append(reward)
                 done_list.append(done)
                 env_returns[i] += reward * self.gamma ** step
+                self.regime_actions[env.day_regime][actions[i].item()] += 1
+                if done:
+                    self.regime_equity[env.day_regime].append(info["equity"])
 
             all_obs.append(obs_batch)
             all_actions.append(actions)
@@ -133,34 +139,51 @@ class GRPOTrainer:
                       f"Running Avg: {avg_ret:8.2f} | Loss: {loss:.4f} | Ent: {ent:.3f}",
                       flush=True)
 
+            if ep % 100 == 99:
+                self.log_regime_behavior()
+
         rewards = list(self.episode_rewards)
         tail = rewards[-50:] if len(rewards) >= 50 else rewards
         return float(np.mean(tail))
+
+    def log_regime_behavior(self):
+        print("  --- Per-regime behavior (hold/buy/sell %, mean equity) ---", flush=True)
+        for r in range(4):
+            acts = self.regime_actions[r]
+            total = acts.sum()
+            eq = self.regime_equity[r]
+            if total == 0:
+                continue
+            pct = 100 * acts / total
+            eq_str = f"₹{np.mean(eq):,.0f}" if eq else "n/a"
+            print(f"  regime {r}: hold {pct[0]:4.1f}% buy {pct[1]:4.1f}% "
+                  f"sell {pct[2]:4.1f}% | mean equity {eq_str}", flush=True)
 
     def save_model(self, path="policy_grpo.pth"):
         torch.save(self.policy.state_dict(), path)
         print(f"Model saved to {path}")
 
 
-# --- Regime mix: sample across vol regimes so the policy doesn't overfit one day ---
+# --- Regime mix: (OHLC, regime) pairs spanning the fitted regime space ---
+# Regime labels follow the volatility ordering from regime_labeler:
+# 0 quiet / 1 mild drift / 2 trending / 3 event-driven high-vol
 OHLC_POOL = [
-    (1304.30, 1317.10, 1300.00, 1317.00),  # RELIANCE-like low-vol day
-    (2500.00, 2560.00, 2475.00, 2530.00),  # mid-vol
-    (100.00, 105.00, 95.00, 102.00),       # high-vol synthetic
-    (1500.00, 1560.00, 1480.00, 1580.00),  # trending
-    (800.00, 803.00, 795.00, 797.00),      # flat / range-bound
-    (2200.00, 2310.00, 2190.00, 2260.00),  # wide range
+    ((800.00, 803.00, 795.00, 797.00), 0),     # flat / range-bound
+    ((1304.30, 1317.10, 1300.00, 1317.00), 1), # RELIANCE-like normal day
+    ((2500.00, 2560.00, 2475.00, 2530.00), 1), # mild-vol
+    ((1500.00, 1560.00, 1480.00, 1580.00), 2), # trending
+    ((2200.00, 2310.00, 2190.00, 2260.00), 2), # wide range
+    ((100.00, 105.00, 95.00, 102.00), 3),      # high-vol event day
 ]
 
 
 def env_factory():
-    # 60% real Reliance anchor, 40% sampled from regime pool
+    # 60% real Reliance anchor (regime 1), 40% sampled across the regime pool
     if np.random.rand() < 0.6:
-        ohlc = (1304.30, 1317.10, 1300.00, 1317.00)
+        ohlc, regime = OHLC_POOL[1]
     else:
-        idx = int(np.random.randint(len(OHLC_POOL)))
-        ohlc = OHLC_POOL[idx]
-    return TradingEnv(ohlc, initial_cash=100_000, n_bars=390)
+        ohlc, regime = OHLC_POOL[int(np.random.randint(len(OHLC_POOL)))]
+    return TradingEnv(ohlc, initial_cash=100_000, n_bars=390, regime=regime)
 
 
 if __name__ == "__main__":

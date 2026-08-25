@@ -3,11 +3,34 @@
 No trading logic. Produces realistic bid/ask/mid tick streams from one daily OHLC bar.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from gumbel_hawkes_sim import pin_the_range
+
+# Per-regime multipliers on top of EngineConfig defaults. Regime index follows
+# the volatility ordering from regime_labeler (0 = quietest, 3 = wildest).
+# Defaults calibrated from the NIFTY-50 5-day K-Means fit (see regime_labels.csv):
+#   regime vol means: 0.0089 / 0.0107 / 0.0129 / 0.0151
+REGIME_CONFIG = {
+    0: {"vol_scale": 0.70, "base_intensity": 0.10, "spread_base": 0.0004, "fit_alpha": 0.02},
+    1: {"vol_scale": 1.00, "base_intensity": 0.15, "spread_base": 0.0005, "fit_alpha": 0.04},
+    2: {"vol_scale": 2.00, "base_intensity": 0.40, "spread_base": 0.0015, "fit_alpha": 0.10},
+    3: {"vol_scale": 1.50, "base_intensity": 0.30, "spread_base": 0.0010, "fit_alpha": 0.07},
+}
+
+
+def regime_config(cfg: "EngineConfig", regime: int) -> "EngineConfig":
+    """Apply regime multipliers on top of a base EngineConfig (scoped copy)."""
+    mult = REGIME_CONFIG[int(regime)]
+    return replace(
+        cfg,
+        sigma_daily=cfg.sigma_daily * mult["vol_scale"],
+        base_intensity=mult["base_intensity"],
+        spread_base=mult["spread_base"],
+        fit_alpha=mult["fit_alpha"],
+    )
 
 
 @dataclass
@@ -77,20 +100,26 @@ class PriceEngine:
         self.cfg = cfg or EngineConfig()
         self.rng = np.random.default_rng(self.cfg.seed)
 
-    def run(self, open_price: float, high: float, low: float, close: float):
-        """Bridge-anchored base + Hawkes log overlay + asymmetric Gumbel quote."""
-        base_bridge = pin_the_range(open_price, high, low, close, self.cfg.n_bars)
+    def run(self, open_price: float, high: float, low: float, close: float,
+            regime: int | None = None):
+        """Bridge-anchored base + Hawkes log overlay + asymmetric Gumbel quote.
+
+        If regime (0-3) is given, applies the REGIME_CONFIG multipliers to
+        volatility, Hawkes intensity/excitation, and spread width for this run.
+        """
+        cfg = regime_config(self.cfg, regime) if regime is not None else self.cfg
+        base_bridge = pin_the_range(open_price, high, low, close, cfg.n_bars)
         log_base = np.log(base_bridge / open_price)
 
-        hawkes = MomentumHawkes(self.cfg, self.rng)
+        hawkes = MomentumHawkes(cfg, self.rng)
         ema_ref = open_price
         mids, bids, asks, momentums, lambdas = [], [], [], [], []
 
-        for t in range(self.cfg.n_bars):
+        for t in range(cfg.n_bars):
             base_mid = open_price * np.exp(log_base[t])
             # momentum = log distance from EMA anchor
             momentum = (np.log(base_mid) - np.log(ema_ref)) if ema_ref > 0 else 0.0
-            ema_ref = ema_ref * np.exp(momentum / self.cfg.momentum_ema)
+            ema_ref = ema_ref * np.exp(momentum / cfg.momentum_ema)
 
             jump, lam = hawkes.jump_now(momentum * 100)  # intensity uses standardized momentum (x100)
             mid_ = base_mid * np.exp(jump)  # Hawkes overlay in log space
@@ -101,8 +130,8 @@ class PriceEngine:
             u = gumbel_u_sample(self.rng)
             # Cap momentum contribution: spread grows by up to 2x base in trending regimes
             spboost = min(abs(momentum) * 2, 2.0)
-            spread_pct = max(self.cfg.spread_base * (1 + spboost) * (0.5 + u * 0.2), 0.0001)
-            bid, ask = asymmetric_spread(mid_, momentum * 100, spread_pct, self.cfg)
+            spread_pct = max(cfg.spread_base * (1 + spboost) * (0.5 + u * 0.2), 0.0001)
+            bid, ask = asymmetric_spread(mid_, momentum * 100, spread_pct, cfg)
 
             mids.append(mid_)
             bids.append(bid)
@@ -120,6 +149,7 @@ class PriceEngine:
             "high": high,
             "low": low,
             "close": close,
+            "regime": regime,
         }
 
 
