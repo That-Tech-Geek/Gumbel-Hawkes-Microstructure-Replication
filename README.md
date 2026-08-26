@@ -2,7 +2,6 @@
 
 A research codebase for building synthetic intraday price series from daily OHLC bars, calibrated against real NSE 1‑minute data. The generator is fully deterministic, regime‑aware, and validated end‑to‑end on the NIFTY 50.
 
----
 
 ## Core Architecture
 
