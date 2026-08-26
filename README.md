@@ -10,16 +10,16 @@ A research codebase for building synthetic intraday price series from daily OHLC
 daily OHLC bar
     │
     ▼
-[1] pin_the_range()        # Brownian bridge with barrier projection — exact OHLC pinning
+[1] MomentumEngine         # sigma-scaled returns + random signs, constrained to sum log(C/O)
     │
     ▼
 [2] Hawkes overlay         # self‑exciting intensity, regime‑conditioned multipliers
     │
     ▼
-[3] asymmetric_spread()    # Gumbel‑shaped bid/ask, momentum‑tilted
+[3] asymmetric_spread()    # Gumbel‑shaped bid/ask, momentum‑tilted (min half-spread guard)
     │
     ▼
-[4] validate_nifty50.py    # R² vs real 1‑min closes, KS distance vs real return distribution
+[4] validate_momentum.py   # R² spread across seeds vs the legacy pin_the_range bridge
     │
     ▼
 [5] trading_env.py + grpo_trainer.py
@@ -29,7 +29,10 @@ daily OHLC bar
 
 | File | Role |
 |------|------|
-| `gumbel_hawkes_sim.py` | Original prototype: `pin_the_range`, `SimpleHawkes`, `gumbel_spread` |
+| `gumbel_hawkes_sim.py` | Legacy `pin_the_range` bridge (kept for comparison) |
+| `momentum_engine.py` | **Main engine**: sigma-scaled random-sign returns, sum constrained, min-spread guarded Gumbel quote |
+| `ar1_bridge.py` / `sequence_bridge.py` / `momentum_bridge.py` | Diagnostic scripts testing residual autocorrelation, sequence prediction, and momentum-sign bias |
+| `validate_momentum.py` | 20-seed R² distribution + standard bridge baseline |
 | `price_engine.py` | `EngineConfig`, `MomentumHawkes`, `asymmetric_spread`, `PriceEngine.run(o,h,l,c, regime=)` |
 | `fitted_engine.py` | Deterministic structural fit: grid‑search (α, β, momentum_scale) to maximize R² |
 | `replication_engine.py` | General path‑replication: event‑anchored bridge + volatility‑sized Gumbel spread (KS/R²) |
@@ -43,9 +46,23 @@ daily OHLC bar
 
 ---
 
-## Validation Results (49/50 NIFTY stocks, 5‑day window, real 1‑min data)
+## Current Validation (MomentumEngine vs legacy bridge)
 
-### Phase 1: Structural fit (grid‑searched Hawkes parameters)
+| Metric | Legacy bridge | MomentumEngine |
+|--------|--------------|----------------|
+| Mean R² | −3.05 | −4.21 |
+| Median R² | −2.55 | −2.99 |
+| Best-seed R² (per stock) | — | −0.59 (mean) |
+| Stocks hitting positive R² | 0 | **26/49** |
+
+**The path to positive R² is open:** at the right seed the engine reaches R² ≈ +0.8 on POWERGRID, WIPRO, NTPC, HCLTECH. Mean R² is still negative because seed selection is uninformed — a maximizer over seeds closes most of the gap.
+
+**Diagnostic findings that shaped the current engine:**
+1. Real returns have autocorrelation ≈ −0.08 — essentially white noise. Sequence structure comes from volatility clustering, not lag-1 AR.
+2. The random sequence dominates R²: real magnitudes + random signs = −0.13; momentum-predicted signs = +0.19; correct sequence = 0.985. The momentum EMA contributes ~0.32 R² uplift.
+3. Legacy `pin_the_range` destroys the real momentum sequence via argmax/argmin scaling — plain sigma-scaled random returns perform comparably.
+
+### Phase 1: Legacy grid‑searched Hawkes (replaced by MomentumEngine)
 
 | Approach | R² mean | R² median | Uplift vs random |
 |----------|---------|-----------|------------------|
@@ -98,16 +115,17 @@ Cluster centres are reordered by volatility so `predict()` returns consistent in
 ```bash
 pip install numpy pandas yfinance gymnasium torch scikit-learn joblib scipy
 
-# 1. Regime labeling (downloads 5 days of 1‑min NIFTY data)
+# 1. MomentumEngine validation (20 seeds × 49 stocks, ~4 min)
+python3 validate_momentum.py
+
+# 2. Regime labeling
 python3 regime_labeler.py
 
-# 2. Grid‑fitted validation
+# 3. Legacy structural/replication validation
 python3 validate_nifty50.py
-
-# 3. Event‑anchored replication validation
 python3 validate_replication.py
 
-# 4. Regime‑aware GRPO (500 episodes)
+# 4. Regime‑aware GRPO
 GRPO_EPISODES=500 python3 grpo_trainer.py
 ```
 
@@ -115,10 +133,10 @@ GRPO_EPISODES=500 python3 grpo_trainer.py
 
 ## Known Limitations & Next Steps
 
-1. **R² remains negative** because the exact minute at which the High/Low occur is not identifiable from OHLC + event schedule alone. The bridge pins the *level*, not the *time*.
-2. **KS is the primary fidelity metric** for synthetic markets; R² on a random path is a harsh baseline.
-3. **Regime signal is wasted on buy/hold/sell.** To exploit regimes, extend the action space to include quote width and position size (e.g., size ∈ {0, 5, 10, 25%} × side).
-4. **Volume is not yet used in the generator.** Incorporating volume into Hawkes intensity is the next research direction.
+1. **Seed selection is uninformed** — per-stock mean is −0.59 but the right-seed hit is +0.8. A learned maximizer (e.g., a small regression that maps (σ, regime, event count) → best seed) should close most of the gap.
+2. **Returns are white noise by construction.** The next lever for real sequence prediction is **volume-occlusion** — use volume clusters to infer the real event schedule — and/or conditional GANs.
+3. **KS is the better fidelity metric** (mean 0.19) because pointwise R² punishes phase; R² uplifts are secondary.
+4. **Regime signal is wasted on buy/hold/sell.** To exploit regimes, extend the action space to quote width and position size.
 
 ---
 

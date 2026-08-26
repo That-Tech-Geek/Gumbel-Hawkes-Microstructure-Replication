@@ -35,7 +35,9 @@ def fetch(tickers):
 
 def r2(xs, ys):
     xs, ys = np.asarray(xs), np.asarray(ys)
-    if len(xs) < 2:
+    n = min(len(xs), len(ys))
+    xs, ys = xs[:n], ys[:n]
+    if n < 2:
         return np.nan
     ss_res = np.sum((ys - xs) ** 2)
     ss_tot = np.sum((ys - ys.mean()) ** 2)
