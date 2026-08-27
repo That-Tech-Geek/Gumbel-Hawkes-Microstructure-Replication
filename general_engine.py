@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from gumbel_settlement import GumbelSettlement
+
 
 @dataclass
 class GeneralParams:
@@ -251,9 +253,6 @@ class GeneralizedPriceEngine:
         dW_v = p.rho * z1 + np.sqrt(1 - p.rho ** 2) * z2
 
         # Stochastic vol: absolute scale = fitted vol, evolve with Heston shape.
-        # Compensate discretization: the Heston residual roughly compensates for
-        # sampling error in simple scaling. Use theta directly when vol_effective
-        # is shrunk to near 0; otherwise scale by vol_effective.
         vol_abs = (p.vol ** 2) if p.vol > 0 else p.theta
         if vol_abs <= 1e-12:
             vol_abs = p.vol ** 2
@@ -292,6 +291,14 @@ class GeneralizedPriceEngine:
         return {"mid": mids, "lower": lower, "upper": upper,
                 "variance": v, "jumps": jumps, "log_rets": log_rets,
                 "params": p}
+
+    def settle(self, mid_prices, momentums, seed=None):
+        """Generate bid/ask from Gumbel settlement model."""
+        if not hasattr(self, '_settlement'):
+            self._settlement = GumbelSettlement()
+        if seed is not None:
+            self._settlement.rng = np.random.default_rng(seed)
+        return self._settlement.quote_series(mid_prices, momentums)
 
 
 def evaluate_general(price_series, name="series"):
