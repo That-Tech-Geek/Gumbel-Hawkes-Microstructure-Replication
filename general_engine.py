@@ -22,6 +22,7 @@ import numpy as np
 
 from gumbel_settlement import GumbelSettlement
 from perlin_tuner import PerlinTuner
+from ewma_analytics import fit_ewma_params, optimize_lookback
 
 
 @dataclass
@@ -45,6 +46,9 @@ class GeneralParams:
     perlin_base_freq: float = 4.0  # cycles of the lowest octave across the path
     perlin_min_scale: float = 0.5  # clamp lower
     perlin_max_scale: float = 1.5  # clamp upper
+    # EWMA weighting (tunable)
+    ewma_tau: float | None = None   # half-life in bars; None = flat (unweighted)
+    ewma_optimize: bool = False     # auto-tune tau on fit()
 
 
 class GeneralizedPriceEngine:
@@ -86,20 +90,30 @@ class GeneralizedPriceEngine:
         if len(self.log_returns) < 5:
             raise ValueError("Need at least 5 returns")
 
-        # Basic stats per dt
-        self.params.drift = float(np.mean(self.log_returns))
-        # Normalize vol by dt so the CIR sink is comparable across timeframes
-        if self.params.dt > 1e-12:
-            self.params.vol = float(np.std(self.log_returns)) * np.sqrt(1.0 / self.params.dt)
+        # EWMA-weighted parameter estimation (recent data weighted more)
+        p = self.params
+        if p.ewma_optimize and p.ewma_tau is None:
+            best, _ = optimize_lookback(self.log_returns)
+            p.ewma_tau = best.tau
+        if p.ewma_tau is not None:
+            e = fit_ewma_params(self.log_returns, p.ewma_tau)
+            p.drift = e["drift"]
+            p.vol = e["vol"]
+            p.lam = e["lam"]
         else:
-            self.params.vol = float(np.std(self.log_returns))
+            p.drift = float(np.mean(self.log_returns))
+            p.vol = float(np.std(self.log_returns))
+        # Normalize vol by dt so the CIR sink is comparable across timeframes
+        if p.dt > 1e-12:
+            p.vol = p.vol * np.sqrt(1.0 / p.dt)
 
-        # Jump detection: |return| > 3σ
+        # Jump detection: |return| > 3σ (skip if EWMA already set lam)
         sigma_total = np.std(self.log_returns)
         jump_mask = np.abs(self.log_returns) > 3 * sigma_total
         n_jumps = jump_mask.sum()
 
-        self.params.lam = float(n_jumps / len(self.log_returns)) if len(self.log_returns) > 0 else 0.02
+        if p.ewma_tau is None:
+            self.params.lam = float(n_jumps / len(self.log_returns)) if len(self.log_returns) > 0 else 0.02
 
         if n_jumps > 0:
             jump_sizes = self.log_returns[jump_mask]

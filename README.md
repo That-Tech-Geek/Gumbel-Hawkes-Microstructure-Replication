@@ -84,6 +84,27 @@ pred = engine.predict(n_steps=30, seed=42)
 Wider Perlin ranges (0.3–2.0) widen the confidence interval slightly (85% → 89%)
 — capturing the fact that real parameters drift over time.
 
+## EWMA lookback optimization (tunable)
+
+Parameters (vol, drift, jump intensity) can be estimated with exponential
+weighting so recent data dominates:
+
+```python
+engine.params.ewma_tau = 30          # half-life in bars (fixed)
+# or auto-tune:
+engine.params.ewma_optimize = True   # grid-searches best tau on fit()
+engine.fit(prices)
+```
+
+Lookback study across 49 NIFTY stocks (1y daily, 80/20 walk-forward):
+
+- **Optimal tau is stock-specific**: mean 75 bars, median 80, range 3–120
+- Fast-regime stocks (RELIANCE tau=3, LT tau=4.5) benefit most from short
+  lookbacks; slow stocks (ADANIENT tau=120) barely differ from flat weighting
+- EWMA tightens CIs modestly (105% vs 110% mean width) at equal coverage
+- Biggest wins where vol regime shifts fast: RELIANCE R² −5.4 (EWMA) vs
+  −34.5 (flat)
+
 ## Reproduce
 
 ```bash
