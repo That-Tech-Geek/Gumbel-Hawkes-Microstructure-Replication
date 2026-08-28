@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from gumbel_settlement import GumbelSettlement
+from perlin_tuner import PerlinTuner
 
 
 @dataclass
@@ -38,6 +39,12 @@ class GeneralParams:
     dt: float = 1.0
     drift: float = 0.0
     vol: float = 0.0005
+    # Perlin parameter-drift (tunable)
+    perlin_octaves: int = 4        # more octaves = finer detail
+    perlin_persistence: float = 0.5  # lower = smoother drift
+    perlin_base_freq: float = 4.0  # cycles of the lowest octave across the path
+    perlin_min_scale: float = 0.5  # clamp lower
+    perlin_max_scale: float = 1.5  # clamp upper
 
 
 class GeneralizedPriceEngine:
@@ -252,24 +259,39 @@ class GeneralizedPriceEngine:
         dW_S = z1
         dW_v = p.rho * z1 + np.sqrt(1 - p.rho ** 2) * z2
 
-        # Stochastic vol: absolute scale = fitted vol, evolve with Heston shape.
+        # Baseline absolute vol
         vol_abs = (p.vol ** 2) if p.vol > 0 else p.theta
         if vol_abs <= 1e-12:
             vol_abs = p.vol ** 2
+
+        # Perlin-smooth drift on theta (volatility) and lam (jump intensity) over the path
+        base_seed = int(seed) if seed is not None else 0
+        pt_theta = PerlinTuner(p.perlin_octaves, p.perlin_persistence,
+                               seed=base_seed + 101, base_freq=p.perlin_base_freq,
+                               min_scale=p.perlin_min_scale, max_scale=p.perlin_max_scale)
+        pt_lam = PerlinTuner(p.perlin_octaves, p.perlin_persistence,
+                             seed=base_seed + 202, base_freq=p.perlin_base_freq,
+                             min_scale=p.perlin_min_scale, max_scale=p.perlin_max_scale)
+        theta_t = pt_theta.apply(vol_abs, n)
+        lam_t = pt_lam.apply(p.lam, n)
+
+        # Stochastic vol: Perlin-driven drift on theta, evolve with Heston shape.
         v = np.zeros(n)
-        v[0] = vol_abs
+        v[0] = theta_t[0]
         for t in range(1, n):
-            v[t] = v[t-1] + p.kappa * (vol_abs - v[t-1]) * dt + \
+            v[t] = v[t-1] + p.kappa * (theta_t[t] - v[t-1]) * dt + \
                    p.xi * np.sqrt(max(v[t-1], 0)) * np.sqrt(dt) * dW_v[t]
             v[t] = max(v[t], 1e-8)
 
-        # Jumps
-        n_jumps = rng.poisson(p.lam * n)
-        jump_times = rng.choice(n, size=min(n_jumps, n), replace=False)
-        jump_sizes = rng.normal(p.mu_j, p.sigma_j, size=n_jumps)
+        # Jumps with Perlin-driven intensity
+        jump_mask = rng.uniform(0, 1, n) < np.minimum(lam_t * dt, 1.0)
         jumps = np.zeros(n)
-        for jt, js in zip(jump_times, jump_sizes):
-            jumps[jt] = js
+        n_jump = int(jump_mask.sum())
+        if n_jump > 0:
+            jump_times = np.where(jump_mask)[0]
+            jump_sizes = rng.normal(p.mu_j, p.sigma_j, size=n_jump)
+            for jt, js in zip(jump_times, jump_sizes):
+                jumps[jt] = js
 
         log_rets = np.zeros(n)
         for t in range(n):

@@ -66,6 +66,24 @@ bids, asks = engine.settle(pred["mid"], momentums)
 | `backtest.py` | Walk-forward out-of-sample evaluation |
 | `trading_env.py` / `grpo_trainer.py` | Gymnasium env + GRPO trainer |
 
+## Perlin parameter drift (tunable)
+
+Engine parameters (volatility `theta`, jump intensity `lambda`) drift smoothly
+over the generated path via Perlin noise, instead of staying constant:
+
+```python
+engine.fit(prices)
+engine.params.perlin_octaves = 4          # smoothness
+engine.params.perlin_persistence = 0.5    # roughness (lower = smoother)
+engine.params.perlin_base_freq = 4.0      # cycles across the path
+engine.params.perlin_min_scale = 0.3      # clamp lower multiplier
+engine.params.perlin_max_scale = 2.0      # clamp upper multiplier
+pred = engine.predict(n_steps=30, seed=42)
+```
+
+Wider Perlin ranges (0.3–2.0) widen the confidence interval slightly (85% → 89%)
+— capturing the fact that real parameters drift over time.
+
 ## Reproduce
 
 ```bash
